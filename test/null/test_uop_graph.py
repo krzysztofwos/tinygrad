@@ -210,6 +210,27 @@ class TestUOpGraph(unittest.TestCase):
     out = bf.where(c1, c2)
     self.assertIs(out.simplify(), c2)
 
+  def test_gater_vector_load_where(self):
+    from tinygrad.codegen.late.gater import pm_move_gates_from_index
+    buf = UOp.param(0, dtypes.float, 8)
+    r = UOp.range(4, 0)
+    gate = r < 2
+    ld = UOp(Ops.SHRINK, (buf, (r*2).valid(gate), UOp.const(2))).load()
+    # both lanes wrapped in matching WHERE -> folds into vector load alt without duplicating the load
+    s1 = graph_rewrite(UOp.sink(gate.where(ld.index(0), UOp.const(-1.0, dtypes.float)),
+                                gate.where(ld.index(1), UOp.const(-2.0, dtypes.float))), pm_move_gates_from_index)
+    loads = [u for u in s1.toposort() if u.op is Ops.LOAD]
+    self.assertEqual(len(loads), 1)
+    self.assertEqual(len([u for u in s1.toposort() if u.op is Ops.WHERE]), 0)
+    self.assertEqual([a.val for a in loads[0].src[1].src], [-1.0, -2.0])
+    # lane 0 used both inside and outside WHERE -> must keep WHERE on lane 0, still fold lane 1
+    s2 = graph_rewrite(UOp.sink(gate.where(ld.index(0), UOp.const(-1.0, dtypes.float)), ld.index(0),
+                                gate.logical_not().where(UOp.const(-2.0, dtypes.float), ld.index(1))), pm_move_gates_from_index)
+    loads2 = [u for u in s2.toposort() if u.op is Ops.LOAD]
+    self.assertEqual(len(loads2), 1)
+    self.assertEqual(len([u for u in s2.toposort() if u.op is Ops.WHERE]), 1)
+    self.assertEqual([a.val for a in loads2[0].src[1].src], [0.0, -2.0])
+
   def test_const_cast(self):
     bf = UOp.const(False)
     out = bf.cast(dtypes.int)
